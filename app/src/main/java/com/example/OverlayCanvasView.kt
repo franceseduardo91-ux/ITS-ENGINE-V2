@@ -13,6 +13,17 @@ import android.view.View
 
 class OverlayCanvasView(context: Context, private val service: OverlayService) : View(context) {
 
+    fun setDetectedCuePosition(x: Float, y: Float) {
+        if (service.isOpenCvEnabled.value) {
+            val clampedX = x.coerceIn(tableLeft, tableRight)
+            val clampedY = y.coerceIn(tableTop, tableBottom)
+            // Smoothly interpolate to filter jitter or noise
+            balls[0].pos.x = balls[0].pos.x * 0.7f + clampedX * 0.3f
+            balls[0].pos.y = balls[0].pos.y * 0.7f + clampedY * 0.3f
+            invalidate()
+        }
+    }
+
     // Ball class representing standard pool table elements
     class BallInfo(
         val id: Int,
@@ -50,6 +61,12 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
 
     private val overlayPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
+    }
+
+    private val whiteCuePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
+        color = Color.WHITE
     }
 
     // Billiard Table Coordinates (will be scaled dynamically in onSizeChanged)
@@ -354,11 +371,66 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
         dashedPaint.color = overlayHexColor
 
         val cueBall = balls[0]
-        val activeTargetBall = balls.firstOrNull { it.id == activeTargetBallId } ?: balls[1]
         val ballRadius = 24f
 
-        // Draw targeted/assistance guides
-        if (service.onlyTargetedBalls.value) {
+        // 1. AI Automatic Target/Lock Mode (Aí Line Automatica)
+        if (service.isAiLineEnabled.value) {
+            var bestBallId = activeTargetBallId
+            var maxPocketableScore = -1f
+            
+            balls.forEach { ball ->
+                if (ball.id == 0) return@forEach // skip cue ball
+                pockets.forEach { pocket ->
+                    val distToPocket = distance(ball.pos.x, ball.pos.y, pocket.x, pocket.y)
+                    val distToCue = distance(cueBall.pos.x, cueBall.pos.y, ball.pos.x, ball.pos.y)
+                    
+                    val score = 5000f - distToPocket - (distToCue * 0.15f)
+                    if (score > maxPocketableScore) {
+                        maxPocketableScore = score
+                        bestBallId = ball.id
+                    }
+                }
+            }
+            activeTargetBallId = bestBallId
+            
+            // Draw AI lock tagline
+            textPaint.color = Color.parseColor("#FFD700")
+            textPaint.textSize = 24f
+            canvas.drawText("AI AUTO-LOCK: TARGETED BALL #${bestBallId}", width / 2f, tableTop - 70f, textPaint)
+        }
+
+        val activeTargetBall = balls.firstOrNull { it.id == activeTargetBallId } ?: balls[1]
+
+        // 2. OpenCV Taco-tracking Guideline Splits
+        // "A linha guia tem os dois vetores para esquerda e para direita para a bola alvo e para a bola branca."
+        if (service.isOpenCvEnabled.value) {
+            val cueStartX = cueBall.pos.x
+            val cueStartY = cueBall.pos.y
+            
+            val dxCueBallToTarget = activeTargetBall.pos.x - cueStartX
+            val dyCueBallToTarget = activeTargetBall.pos.y - cueStartY
+            val distCueBallToTarget = kotlin.math.sqrt(dxCueBallToTarget * dxCueBallToTarget + dyCueBallToTarget * dyCueBallToTarget)
+            
+            if (distCueBallToTarget > 0) {
+                // Drawing direct guideline to the target ball in pure white
+                whiteCuePaint.color = Color.WHITE
+                whiteCuePaint.strokeWidth = 7f
+                drawGuideline(canvas, cueStartX, cueStartY, activeTargetBall.pos.x, activeTargetBall.pos.y, whiteCuePaint, false)
+                
+                // One left vector split
+                val splitLeftX = -dyCueBallToTarget / distCueBallToTarget * 180f
+                val splitLeftY = dxCueBallToTarget / distCueBallToTarget * 180f
+                drawGuideline(canvas, activeTargetBall.pos.x, activeTargetBall.pos.y, activeTargetBall.pos.x + splitLeftX, activeTargetBall.pos.y + splitLeftY, whiteCuePaint, true)
+                
+                // One right vector split
+                val splitRightX = dyCueBallToTarget / distCueBallToTarget * 180f
+                val splitRightY = -dxCueBallToTarget / distCueBallToTarget * 180f
+                drawGuideline(canvas, activeTargetBall.pos.x, activeTargetBall.pos.y, activeTargetBall.pos.x + splitRightX, activeTargetBall.pos.y + splitRightY, whiteCuePaint, true)
+            }
+        }
+
+        // Draw targeted/assistance guides (if active)
+        if (service.isLineEnabled.value && service.onlyTargetedBalls.value) {
             // Find closest pocket to target ball
             var targetPocket = pockets[1]
             var minDist = Float.MAX_VALUE
@@ -467,46 +539,48 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
             }
 
         } else {
-            // Draw predictive guides for ALL active object balls (vibrant multi-guide grid mode!)
-            balls.forEach { ball ->
-                if (ball.id == 0) return@forEach // skip cue ball
+            if (service.isLineEnabled.value) {
+                // Draw predictive guides for ALL active object balls (vibrant multi-guide grid mode!)
+                balls.forEach { ball ->
+                    if (ball.id == 0) return@forEach // skip cue ball
 
-                // Sort pockets by distance to find nearest pocket for EACH ball
-                var nearestPocket = pockets[0]
-                var mDist = Float.MAX_VALUE
-                pockets.forEach { pocket ->
-                    val dist = distance(ball.pos.x, ball.pos.y, pocket.x, pocket.y)
-                    if (dist < mDist) {
-                        mDist = dist
-                        nearestPocket = pocket
+                    // Sort pockets by distance to find nearest pocket for EACH ball
+                    var nearestPocket = pockets[0]
+                    var mDist = Float.MAX_VALUE
+                    pockets.forEach { pocket ->
+                        val dist = distance(ball.pos.x, ball.pos.y, pocket.x, pocket.y)
+                        if (dist < mDist) {
+                            mDist = dist
+                            nearestPocket = pocket
+                        }
                     }
-                }
 
-                // Draw solid prediction line directly to their closest pocket
-                val bouncesCount = service.cushionBounces.value
-                val pathDX = nearestPocket.x - ball.pos.x
-                val pathDY = nearestPocket.y - ball.pos.y
+                    // Draw solid prediction line directly to their closest pocket
+                    val bouncesCount = service.cushionBounces.value
+                    val pathDX = nearestPocket.x - ball.pos.x
+                    val pathDY = nearestPocket.y - ball.pos.y
 
-                val segments = calculateReflections(ball.pos, pathDX, pathDY, bouncesCount)
-                
-                // Assign matching paint color per ball logic
-                val paintInstance = Paint(linePaint).apply { strokeWidth = 5f; color = ball.color }
-                for (i in 0 until segments.size - 1) {
-                    drawGuideline(canvas, segments[i].x, segments[i].y, segments[i + 1].x, segments[i + 1].y, paintInstance, false)
-                }
+                    val segments = calculateReflections(ball.pos, pathDX, pathDY, bouncesCount)
+                    
+                    // Assign matching paint color per ball logic
+                    val paintInstance = Paint(linePaint).apply { strokeWidth = 5f; color = ball.color }
+                    for (i in 0 until segments.size - 1) {
+                        drawGuideline(canvas, segments[i].x, segments[i].y, segments[i + 1].x, segments[i + 1].y, paintInstance, false)
+                    }
 
-                // Destination target landing overlay
-                if (segments.isNotEmpty() && service.finalBallOverlay.value) {
-                    val finalDest = segments.last()
-                    overlayPaint.color = Color.argb(100, Color.red(ball.color), Color.green(ball.color), Color.blue(ball.color))
-                    canvas.drawCircle(finalDest.x, finalDest.y, ballRadius, overlayPaint)
-                    canvas.drawCircle(finalDest.x, finalDest.y, ballRadius, ballStrokePaint)
+                    // Destination target landing overlay
+                    if (segments.isNotEmpty() && service.finalBallOverlay.value) {
+                        val finalDest = segments.last()
+                        overlayPaint.color = Color.argb(100, Color.red(ball.color), Color.green(ball.color), Color.blue(ball.color))
+                        canvas.drawCircle(finalDest.x, finalDest.y, ballRadius, overlayPaint)
+                        canvas.drawCircle(finalDest.x, finalDest.y, ballRadius, ballStrokePaint)
 
-                    // Draw indexed labeled circle at pocket center
-                    if (service.ballIndexLabels.value) {
-                        textPaint.color = if (ball.id == 8) Color.BLACK else Color.WHITE
-                        textPaint.textSize = 18f
-                        canvas.drawText("${ball.id}", finalDest.x, finalDest.y + 6f, textPaint)
+                        // Draw indexed labeled circle at pocket center
+                        if (service.ballIndexLabels.value) {
+                            textPaint.color = if (ball.id == 8) Color.BLACK else Color.WHITE
+                            textPaint.textSize = 18f
+                            canvas.drawText("${ball.id}", finalDest.x, finalDest.y + 6f, textPaint)
+                        }
                     }
                 }
             }

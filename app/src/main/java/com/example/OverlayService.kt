@@ -10,6 +10,8 @@ import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
+import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -45,6 +47,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -84,6 +87,13 @@ class OverlayService : Service() {
     var colorBalls = mutableStateOf(true)
     var isAnalyzing = mutableStateOf(true)
     var isInteractiveMode = mutableStateOf(false)
+
+    // ITS ENGINE V1 Core Custom States
+    var isOpenCvEnabled = mutableStateOf(false)
+    var isLineEnabled = mutableStateOf(true)
+    var isAiLineEnabled = mutableStateOf(false)
+    var detectedCueX = mutableStateOf(-1f)
+    var detectedCueY = mutableStateOf(-1f)
 
     // Easy Victory premium local features mapped
     var onlyTargetedBalls = mutableStateOf(false)
@@ -174,24 +184,105 @@ class OverlayService : Service() {
         }
     }
 
+    private var imageReader: ImageReader? = null
+    private var lastScannedTime = 0L
+
     private fun setupMediaProjection(resultCode: Int, resultData: Intent) {
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
 
-        // Setup VirtualDisplay to capture screen frames for simulated OpenCV pipeline
         val metrics = DisplayMetrics()
         windowManager.defaultDisplay.getRealMetrics(metrics)
+        val screenWidth = metrics.widthPixels
+        val screenHeight = metrics.heightPixels
 
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ITSEngineCapture",
-            metrics.widthPixels,
-            metrics.heightPixels,
-            metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            null, // Surface to pipe frames can go here (e.g. ImageReader or MediaCodec)
-            null,
-            null
-        )
+        // Downscale capture frame sizes to prevent image-buffer allocation delays
+        val captureWidth = screenWidth / 4
+        val captureHeight = screenHeight / 4
+
+        try {
+            imageReader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2).apply {
+                setOnImageAvailableListener({ reader ->
+                    if (isOpenCvEnabled.value || isAiLineEnabled.value) {
+                        processScreenFrame(reader)
+                    }
+                }, handler)
+            }
+
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ITSEngineCapture",
+                captureWidth,
+                captureHeight,
+                metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface,
+                null,
+                null
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun processScreenFrame(reader: ImageReader) {
+        val currentTime = System.currentTimeMillis()
+        // limit scan to 10fps to avoid performance signature or battery drain
+        if (currentTime - lastScannedTime < 100) return
+        lastScannedTime = currentTime
+
+        var image: Image? = null
+        try {
+            image = reader.acquireLatestImage() ?: return
+            val planes = image.planes
+            if (planes.isEmpty()) return
+            val buffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
+            val width = image.width
+            val height = image.height
+
+            var whiteCount = 0
+            var sumX = 0f
+            var sumY = 0f
+
+            // Scan pixels in a fast grid
+            val yStep = 6
+            val xStep = 6
+            for (y in 0 until height step yStep) {
+                for (x in 0 until width step xStep) {
+                    val offset = y * rowStride + x * pixelStride
+                    if (offset + 2 < buffer.remaining()) {
+                        val r = buffer.get(offset).toInt() and 0xFF
+                        val g = buffer.get(offset + 1).toInt() and 0xFF
+                        val b = buffer.get(offset + 2).toInt() and 0xFF
+
+                        // A high-brightness white or very light pixel characteristic of the pool white guides/balls
+                        if (r > 240 && g > 240 && b > 240) {
+                            whiteCount++
+                            sumX += x
+                            sumY += y
+                        }
+                    }
+                }
+            }
+
+            if (whiteCount > 10) {
+                val foundX = (sumX / whiteCount) * 4f // map back to full size
+                val foundY = (sumY / whiteCount) * 4f
+                
+                // Filter out boundary outliers
+                if (foundX > 100 && foundY > 100) {
+                    handler.post {
+                        detectedCueX.value = foundX
+                        detectedCueY.value = foundY
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // fail-silent
+        } finally {
+            image?.close()
+        }
     }
 
     private fun showFloatingPanel() {
@@ -231,38 +322,39 @@ class OverlayService : Service() {
                 Box(
                     modifier = Modifier
                         .pointerInput(Unit) {
-                            detectDragGestures { change, dragAmount ->
-                                change.consume()
-                                offsetX += dragAmount.x
-                                offsetY += dragAmount.y
-                                params.x = offsetX.roundToInt()
-                                params.y = offsetY.roundToInt()
-                                windowManager.updateViewLayout(overlayView, params)
-                            }
+                            detectDragGestures(
+                                onDragEnd = {
+                                    val metrics = DisplayMetrics()
+                                    windowManager.defaultDisplay.getRealMetrics(metrics)
+                                    val screenWidth = metrics.widthPixels
+                                    // Snaps to screen edges (gruda no canto da tela)
+                                    if (offsetX < screenWidth / 2f) {
+                                        offsetX = 10f
+                                    } else {
+                                        offsetX = (screenWidth - if (isExpanded) 440f else 180f)
+                                    }
+                                    params.x = offsetX.roundToInt()
+                                    windowManager.updateViewLayout(overlayView, params)
+                                },
+                                onDrag = { change, dragAmount ->
+                                    change.consume()
+                                    offsetX += dragAmount.x
+                                    offsetY += dragAmount.y
+                                    params.x = offsetX.roundToInt()
+                                    params.y = offsetY.roundToInt()
+                                    windowManager.updateViewLayout(overlayView, params)
+                                }
+                            )
                         }
                 ) {
                     if (isExpanded) {
                         FloatingDashboard(
                             onCollapse = { isExpanded = false },
                             onClose = { stopSelf() },
-                            aimBall = aimBallEnabled,
-                            aimCacapa = aimCacapaEnabled,
-                            espLine = espLineEnabled,
-                            espLineBall = espLineBallEnabled,
-                            espLineCue = espLineCueEnabled,
-                            lineColor = colorLine,
-                            colorBalls = colorBalls,
-                            isAnalyzing = isAnalyzing,
+                            isOpenCv = isOpenCvEnabled,
+                            isLine = isLineEnabled,
+                            isAiLine = isAiLineEnabled,
                             isInteractiveMode = isInteractiveMode,
-                            onlyTargetedBalls = onlyTargetedBalls,
-                            drawPockets = drawPockets,
-                            pocketShotState = pocketShotState,
-                            ghostBallOverlay = ghostBallOverlay,
-                            finalBallOverlay = finalBallOverlay,
-                            ballIndexLabels = ballIndexLabels,
-                            cushionBounces = cushionBounces,
-                            guidelineStyle = guidelineStyle,
-                            overlayTransparency = overlayTransparency,
                             onInteractiveModeChanged = { enabled ->
                                 setCanvasTouchable(enabled)
                             }
@@ -317,6 +409,7 @@ class OverlayService : Service() {
         super.onDestroy()
         overlayView?.let { windowManager.removeView(it) }
         canvasView?.let { windowManager.removeView(it) }
+        imageReader?.close()
         virtualDisplay?.release()
         mediaProjection?.stop()
         handler.removeCallbacksAndMessages(null)
@@ -354,18 +447,19 @@ class ComposeLifecycleOwner : androidx.lifecycle.LifecycleOwner, androidx.lifecy
 fun FloatingMiniButton(onExpand: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(54.dp)
-            .clip(RoundedCornerShape(27.dp))
-            .background(GlassBg)
-            .border(2.dp, BloodRed, RoundedCornerShape(27.dp))
+            .size(56.dp)
+            .clip(RoundedCornerShape(28.dp))
+            .background(Color(0xFF8B1010)) 
+            .border(2.5.dp, Color(0xFFD4AF37), RoundedCornerShape(28.dp))
             .clickable { onExpand() },
         contentAlignment = Alignment.Center
     ) {
-        Box(
-            modifier = Modifier
-                .size(24.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(GoldYellow)
+        Text(
+            text = "ITS",
+            color = Color(0xFFD4AF37),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.ExtraBold,
+            fontFamily = FontFamily.Monospace
         )
     }
 }
@@ -374,322 +468,240 @@ fun FloatingMiniButton(onExpand: () -> Unit) {
 fun FloatingDashboard(
     onCollapse: () -> Unit,
     onClose: () -> Unit,
-    aimBall: MutableState<Boolean>,
-    aimCacapa: MutableState<Boolean>,
-    espLine: MutableState<Boolean>,
-    espLineBall: MutableState<Boolean>,
-    espLineCue: MutableState<Boolean>,
-    lineColor: MutableState<Color>,
-    colorBalls: MutableState<Boolean>,
-    isAnalyzing: MutableState<Boolean>,
+    isOpenCv: MutableState<Boolean>,
+    isLine: MutableState<Boolean>,
+    isAiLine: MutableState<Boolean>,
     isInteractiveMode: MutableState<Boolean>,
-    onlyTargetedBalls: MutableState<Boolean>,
-    drawPockets: MutableState<Boolean>,
-    pocketShotState: MutableState<Boolean>,
-    ghostBallOverlay: MutableState<Boolean>,
-    finalBallOverlay: MutableState<Boolean>,
-    ballIndexLabels: MutableState<Boolean>,
-    cushionBounces: MutableState<Int>,
-    guidelineStyle: MutableState<String>,
-    overlayTransparency: MutableState<Float>,
     onInteractiveModeChanged: (Boolean) -> Unit
 ) {
-    var activeTab by remember { mutableStateOf("VISUAL") }
+    var activeTab by remember { mutableStateOf("ABA 1") }
 
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xEB0F0F14)), // Premium dark glass
-        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xF20B0B0F)), // Liquid dark premium dashboard
+        shape = RoundedCornerShape(16.dp),
         modifier = Modifier
-            .width(280.dp)
-            .border(1.2.dp, Color(0xFFD4AF37).copy(alpha = 0.5f), RoundedCornerShape(12.dp)) // Royal gold border accent
+            .size(430.dp) // Requested EXACT 430x430 physical card size
+            .border(2.dp, Color(0xFFD4AF37).copy(alpha = 0.8f), RoundedCornerShape(16.dp))
     ) {
         Column(
-            modifier = Modifier.padding(10.dp)
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Header Info Bar (EV PRO Header Style)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color.Green)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
+            // Header Info Bar (ITS Engine Pro)
+            Column {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(Color.Green)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "ITS ENGINE V1 PRO",
+                            color = Color(0xFFD4AF37),
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 15.sp,
+                            letterSpacing = 1.sp
+                        )
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        IconButton(
+                            onClick = onCollapse,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Settings,
+                                contentDescription = "Minimize",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onClose,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Stop",
+                                tint = Color(0xFFFF4D4D),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
                     Text(
-                        text = "EV.DEVIP | ITS ENGINE",
-                        color = Color(0xFFD4AF37), // Metallic gold
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 12.sp,
+                        text = "STATUS: ONLINE ACTIVE",
+                        color = Color.LightGray,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
                         letterSpacing = 0.5.sp
                     )
+                    Text(
+                        text = "VIP OFFRESH-CV v1",
+                        color = Color(0xFFD4AF37),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                    IconButton(
-                        onClick = onCollapse,
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Minimize",
-                            tint = Color.White,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                    IconButton(
-                        onClick = onClose,
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Stop",
-                            tint = Color(0xFFFF4D4D),
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                }
-            }
+                Spacer(modifier = Modifier.height(14.dp))
 
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "PRO | LOCAL OFFLINE ACTIVE",
-                color = Color.LightGray,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 1.sp,
-                modifier = Modifier.padding(start = 2.dp)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Navigation Tabs Bar (AIM | VISUAL | MISC | PROFILE)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF1E1E26), RoundedCornerShape(6.dp))
-                    .padding(2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                val tabs = listOf("AIM", "VISUAL", "MISC", "PROFILE")
-                tabs.forEach { tab ->
-                    val isSelected = activeTab == tab
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(if (isSelected) Color(0xFF4C1010) else Color.Transparent) // Dark amber/red highlight
-                            .clickable { activeTab = tab }
-                            .padding(vertical = 6.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = tab,
-                            color = if (isSelected) Color(0xFFD4AF37) else Color.Gray,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 10.sp
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Tab contents
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                when (activeTab) {
-                    "AIM" -> {
-                        // Cushion Bounces Selector Selector
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                // Robust Exactly 2 Abas/Tabs selection
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF16161F), RoundedCornerShape(8.dp))
+                        .padding(3.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    listOf("ABA 1", "ABA 2").forEach { tab ->
+                        val isSelected = activeTab == tab
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (isSelected) Color(0xFF5C1212) else Color.Transparent)
+                                .clickable { activeTab = tab }
+                                .padding(vertical = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
                             Text(
-                                text = "CUSHION BOUNCES",
-                                color = Color.Gray,
-                                fontSize = 9.sp,
+                                text = tab,
+                                color = if (isSelected) Color(0xFFD4AF37) else Color.Gray,
                                 fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.5.sp
+                                fontSize = 13.sp,
+                                letterSpacing = 1.sp
                             )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                (0..3).forEach { num ->
-                                    val isSel = cushionBounces.value == num
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .background(if (isSel) Color(0xFFD4AF37) else Color(0xFF252530))
-                                            .clickable { cushionBounces.value = num }
-                                            .padding(vertical = 6.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = if (num == 0) "Direct" else "$num Cushion",
-                                            color = if (isSel) Color.Black else Color.White,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 9.sp
-                                        )
-                                    }
-                                }
-                            }
                         }
-
-                        EngineToggleRow(label = "AIM CUE BALL", checked = aimBall.value, onCheckedChange = { aimBall.value = it })
-                        EngineToggleRow(label = "ESP CUE ALIGNMENT", checked = espLineCue.value, onCheckedChange = { espLineCue.value = it })
-                        EngineToggleRow(label = "ESP BALL TO BALL", checked = espLineBall.value, onCheckedChange = { espLineBall.value = it })
-                        EngineToggleRow(label = "AIM POCKET GLOWS", checked = aimCacapa.value, onCheckedChange = { aimCacapa.value = it })
-                        EngineToggleRow(label = "SHOW STICK PATH", checked = espLine.value, onCheckedChange = { espLine.value = it })
                     }
+                }
+            }
 
-                    "VISUAL" -> {
-                        EngineToggleRow(label = "Only Targeted Balls", checked = onlyTargetedBalls.value, onCheckedChange = { onlyTargetedBalls.value = it })
-                        EngineToggleRow(label = "Draw Pockets", checked = drawPockets.value, onCheckedChange = { drawPockets.value = it })
-                        EngineToggleRow(label = "Pocket Shot State", checked = pocketShotState.value, onCheckedChange = { pocketShotState.value = it })
-                        EngineToggleRow(label = "Ghost Ball Overlay", checked = ghostBallOverlay.value, onCheckedChange = { ghostBallOverlay.value = it })
-                        EngineToggleRow(label = "Final Ball Overlay", checked = finalBallOverlay.value, onCheckedChange = { finalBallOverlay.value = it })
-                        EngineToggleRow(label = "Ball Index Labels", checked = ballIndexLabels.value, onCheckedChange = { ballIndexLabels.value = it })
-                        EngineToggleRow(label = "High Contrast Balls", checked = colorBalls.value, onCheckedChange = { colorBalls.value = it })
-                    }
-
-                    "MISC" -> {
-                        EngineToggleRow(
-                            label = "ALIGN MODE (Draggable)",
-                            checked = isInteractiveMode.value,
-                            onCheckedChange = {
-                                isInteractiveMode.value = it
-                                onInteractiveModeChanged(it)
-                            }
+            // Central scrollable/scanned area
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp)
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    if (activeTab == "ABA 1") {
+                        Text(
+                            text = "OPÇÕES DE PROCESSAMENTO GRÁFICO",
+                            color = Color.Gray,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp
                         )
 
-                        // Line color switcher
+                        EngineToggleRow(
+                            label = "Ativar OpenCV",
+                            checked = isOpenCv.value,
+                            onCheckedChange = { isOpenCv.value = it }
+                        )
+                        Text(
+                            text = "Faz varredura e detecta a linha branca do taco do 8 Ball Pool automaticamente por cores.",
+                            color = Color.Gray,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(start = 2.dp, bottom = 4.dp)
+                        )
+
+                        EngineToggleRow(
+                            label = "Ativar Line",
+                            checked = isLine.value,
+                            onCheckedChange = { isLine.value = it }
+                        )
+                        Text(
+                            text = "Desenha a trajetória física das bolas prevendo ricochetes.",
+                            color = Color.Gray,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(start = 2.dp, bottom = 4.dp)
+                        )
+                    } else {
+                        // ABA 2 Options
+                        Text(
+                            text = "INTELIGÊNCIA ARTIFICIAL ATIVA",
+                            color = Color.Gray,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp
+                        )
+
+                        EngineToggleRow(
+                            label = "Aí Line Automatica",
+                            checked = isAiLine.value,
+                            onCheckedChange = { isAiLine.value = it }
+                        )
+                        Text(
+                            text = "Detecção em tempo real de tacada e cálculo rápido de trajetórias em formato automático autônomo.",
+                            color = Color.Gray,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(start = 2.dp, bottom = 4.dp)
+                        )
+
+                        // Styling additions mapped cleanly inside ABA 2 for added values
+                        Divider(color = Color.Gray.copy(alpha = 0.15f), thickness = 1.dp)
+                        
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth()
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(text = "LINE COLOR", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Normal)
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                val colors = listOf(
-                                    Color(0xFFFFD43F) to "Gold",
-                                    Color(0xFFFF4D4D) to "Red",
-                                    Color(0xFF4DFF4D) to "Green",
-                                    Color(0xFF4DFFFF) to "Cyan",
-                                    Color(0xFFE04DFF) to "Pink"
-                                )
-                                colors.forEach { (colorObj, _) ->
-                                    Box(
-                                        modifier = Modifier
-                                            .size(20.dp)
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .background(colorObj)
-                                            .border(
-                                                width = if (lineColor.value == colorObj) 2.dp else 0.dp,
-                                                color = Color.White,
-                                                shape = RoundedCornerShape(4.dp)
-                                            )
-                                            .clickable { lineColor.value = colorObj }
-                                    )
-                                }
-                            }
-                        }
-
-                        // Trajectory style options
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
-                                text = "GUIDELINE VISUAL STYLE",
-                                color = Color.Gray,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold
+                                text = "CALIBRATION OVERLAYS",
+                                color = Color.White,
+                                fontSize = 11.sp
                             )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            Button(
+                                onClick = { 
+                                    isInteractiveMode.value = !isInteractiveMode.value
+                                    onInteractiveModeChanged(isInteractiveMode.value)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = if (isInteractiveMode.value) Color(0xFF5C1212) else Color(0xFF1E1E2C)),
+                                modifier = Modifier.height(26.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                             ) {
-                                val styles = listOf("Neon Solid", "Dashed Glow", "Laser Thin")
-                                styles.forEach { style ->
-                                    val isSel = guidelineStyle.value == style
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .background(if (isSel) Color(0xFFD4AF37) else Color(0xFF252530))
-                                            .clickable { guidelineStyle.value = style }
-                                            .padding(vertical = 5.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = style,
-                                            color = if (isSel) Color.Black else Color.White,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 9.sp
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Transparency slider
-                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(text = "HUD OPACITY", color = Color.White, fontSize = 10.sp)
-                                Text(text = "${(overlayTransparency.value * 100).roundToInt()}%", color = Color(0xFFD4AF37), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            }
-                            Slider(
-                                value = overlayTransparency.value,
-                                onValueChange = { overlayTransparency.value = it },
-                                valueRange = 0.3f..1.0f,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = Color(0xFFD4AF37),
-                                    activeTrackColor = Color(0xFFD4AF37),
-                                    inactiveTrackColor = Color.Gray
-                                ),
-                                modifier = Modifier.height(20.dp)
-                            )
-                        }
-
-                        EngineToggleRow(label = "CPU CORE ENGINE", checked = isAnalyzing.value, onCheckedChange = { isAnalyzing.value = it })
-                    }
-
-                    "PROFILE" -> {
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E26)),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                ProfileTextRow("STATUS", "VIP COLD-LICENSED", Color.Green)
-                                ProfileTextRow("SERVER CAPTURE", "LOCAL DECRYPTED (OFFLINE)", Color(0xFFD4AF37))
-                                ProfileTextRow("NATIVE SIMULATION", "ACTIVE 16-BALLS", Color.White)
-                                ProfileTextRow("PHYSICS ENGINE", "ITS NATIVE REFLECTION-CV", Color.White)
-                                ProfileTextRow("DEVICE COMPAT", "ADAPTIVE WINDOW SCALING", Color.Cyan)
+                                Text(
+                                    text = if (isInteractiveMode.value) "Lock Table" else "Align Table",
+                                    fontSize = 10.sp,
+                                    color = Color.White
+                                )
                             }
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-            Divider(color = Color.Gray.copy(alpha = 0.2f), thickness = 1.dp)
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "ITS ENGINE PRO - OFFLINE DIRECT SIMULATOR",
-                color = Color.Gray,
-                fontSize = 8.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            )
+            // Bottom credits / info bar
+            Column {
+                Divider(color = Color.Gray.copy(alpha = 0.2f), thickness = 1.dp)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "ITS ENGINE V1 © 2026 NATIVE PHYSICS AR HUD",
+                    color = Color.Gray,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                )
+            }
         }
     }
 }
