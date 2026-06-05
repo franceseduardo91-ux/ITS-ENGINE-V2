@@ -83,6 +83,18 @@ class OverlayService : Service() {
     var colorLine = mutableStateOf(Color(0xFFFFD700)) // Gold by default
     var colorBalls = mutableStateOf(true)
     var isAnalyzing = mutableStateOf(true)
+    var isInteractiveMode = mutableStateOf(false)
+
+    fun setCanvasTouchable(touchable: Boolean) {
+        val view = canvasView ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        if (touchable) {
+            params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        } else {
+            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        windowManager.updateViewLayout(view, params)
+    }
 
     // JNI Native Bridge Simulation values
     init {
@@ -229,7 +241,11 @@ class OverlayService : Service() {
                             espLineCue = espLineCueEnabled,
                             lineColor = colorLine,
                             colorBalls = colorBalls,
-                            isAnalyzing = isAnalyzing
+                            isAnalyzing = isAnalyzing,
+                            isInteractiveMode = isInteractiveMode,
+                            onInteractiveModeChanged = { enabled ->
+                                setCanvasTouchable(enabled)
+                            }
                         )
                     } else {
                         FloatingMiniButton(
@@ -345,7 +361,9 @@ fun FloatingDashboard(
     espLineCue: MutableState<Boolean>,
     lineColor: MutableState<Color>,
     colorBalls: MutableState<Boolean>,
-    isAnalyzing: MutableState<Boolean>
+    isAnalyzing: MutableState<Boolean>,
+    isInteractiveMode: MutableState<Boolean>,
+    onInteractiveModeChanged: (Boolean) -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = GlassBg),
@@ -409,6 +427,14 @@ fun FloatingDashboard(
 
             // Configuration Options
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                EngineToggleRow(
+                    label = "ALIGNMENT MODE (Draggable)",
+                    checked = isInteractiveMode.value,
+                    onCheckedChange = {
+                        isInteractiveMode.value = it
+                        onInteractiveModeChanged(it)
+                    }
+                )
                 EngineToggleRow(label = "AIM CUE BALL", checked = aimBall.value, onCheckedChange = { aimBall.value = it })
                 EngineToggleRow(label = "AIM POCKET assistance", checked = aimCacapa.value, onCheckedChange = { aimCacapa.value = it })
                 EngineToggleRow(label = "ESP TRAJECTORY line", checked = espLine.value, onCheckedChange = { espLine.value = it })
