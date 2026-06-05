@@ -1,0 +1,6 @@
+{
+  "name": "ITS ENGINE",
+  "description": "Advanced physics and visual trajectory assistant tool with transparent screen overlays.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
