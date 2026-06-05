@@ -94,6 +94,11 @@ class OverlayService : Service() {
     var isAiLineEnabled = mutableStateOf(false)
     var detectedCueX = mutableStateOf(-1f)
     var detectedCueY = mutableStateOf(-1f)
+    var isSimulationMode = mutableStateOf(true)
+    var tableLeftOffset = mutableStateOf(0f)
+    var tableRightOffset = mutableStateOf(0f)
+    var tableTopOffset = mutableStateOf(0f)
+    var tableBottomOffset = mutableStateOf(0f)
 
     // Easy Victory premium local features mapped
     var onlyTargetedBalls = mutableStateOf(false)
@@ -355,6 +360,11 @@ class OverlayService : Service() {
                             isLine = isLineEnabled,
                             isAiLine = isAiLineEnabled,
                             isInteractiveMode = isInteractiveMode,
+                            isSimulationMode = isSimulationMode,
+                            tableLeftOffset = tableLeftOffset,
+                            tableRightOffset = tableRightOffset,
+                            tableTopOffset = tableTopOffset,
+                            tableBottomOffset = tableBottomOffset,
                             onInteractiveModeChanged = { enabled ->
                                 setCanvasTouchable(enabled)
                             }
@@ -472,6 +482,11 @@ fun FloatingDashboard(
     isLine: MutableState<Boolean>,
     isAiLine: MutableState<Boolean>,
     isInteractiveMode: MutableState<Boolean>,
+    isSimulationMode: MutableState<Boolean>,
+    tableLeftOffset: MutableState<Float>,
+    tableRightOffset: MutableState<Float>,
+    tableTopOffset: MutableState<Float>,
+    tableBottomOffset: MutableState<Float>,
     onInteractiveModeChanged: (Boolean) -> Unit
 ) {
     var activeTab by remember { mutableStateOf("ABA 1") }
@@ -505,7 +520,7 @@ fun FloatingDashboard(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "ITS ENGINE V1 PRO",
+                            text = "ITS ENGINE V2 PRO",
                             color = Color(0xFFD4AF37),
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 15.sp,
@@ -545,14 +560,14 @@ fun FloatingDashboard(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "STATUS: ONLINE ACTIVE",
+                        text = "STATUS: NATIVE ACTIVE ENGINE",
                         color = Color.LightGray,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Medium,
                         letterSpacing = 0.5.sp
                     )
                     Text(
-                        text = "VIP OFFRESH-CV v1",
+                        text = "VIP CORE V2",
                         color = Color(0xFFD4AF37),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold
@@ -569,14 +584,14 @@ fun FloatingDashboard(
                         .padding(3.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    listOf("ABA 1", "ABA 2").forEach { tab ->
-                        val isSelected = activeTab == tab
+                    listOf("CONFIGS HUD", "CALIBRAÇÃO").forEach { tab ->
+                        val isSelected = (tab == "CONFIGS HUD" && activeTab == "ABA 1") || (tab == "CALIBRAÇÃO" && activeTab == "ABA 2")
                         Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(if (isSelected) Color(0xFF5C1212) else Color.Transparent)
-                                .clickable { activeTab = tab }
+                                .clickable { activeTab = if (tab == "CONFIGS HUD") "ABA 1" else "ABA 2" }
                                 .padding(vertical = 10.dp),
                             contentAlignment = Alignment.Center
                         ) {
@@ -597,94 +612,204 @@ fun FloatingDashboard(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(vertical = 12.dp)
+                    .padding(vertical = 10.dp)
             ) {
-                Column(
+                LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     if (activeTab == "ABA 1") {
-                        Text(
-                            text = "OPÇÕES DE PROCESSAMENTO GRÁFICO",
-                            color = Color.Gray,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.5.sp
-                        )
-
-                        EngineToggleRow(
-                            label = "Ativar OpenCV",
-                            checked = isOpenCv.value,
-                            onCheckedChange = { isOpenCv.value = it }
-                        )
-                        Text(
-                            text = "Faz varredura e detecta a linha branca do taco do 8 Ball Pool automaticamente por cores.",
-                            color = Color.Gray,
-                            fontSize = 10.sp,
-                            modifier = Modifier.padding(start = 2.dp, bottom = 4.dp)
-                        )
-
-                        EngineToggleRow(
-                            label = "Ativar Line",
-                            checked = isLine.value,
-                            onCheckedChange = { isLine.value = it }
-                        )
-                        Text(
-                            text = "Desenha a trajetória física das bolas prevendo ricochetes.",
-                            color = Color.Gray,
-                            fontSize = 10.sp,
-                            modifier = Modifier.padding(start = 2.dp, bottom = 4.dp)
-                        )
-                    } else {
-                        // ABA 2 Options
-                        Text(
-                            text = "INTELIGÊNCIA ARTIFICIAL ATIVA",
-                            color = Color.Gray,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.5.sp
-                        )
-
-                        EngineToggleRow(
-                            label = "Aí Line Automatica",
-                            checked = isAiLine.value,
-                            onCheckedChange = { isAiLine.value = it }
-                        )
-                        Text(
-                            text = "Detecção em tempo real de tacada e cálculo rápido de trajetórias em formato automático autônomo.",
-                            color = Color.Gray,
-                            fontSize = 10.sp,
-                            modifier = Modifier.padding(start = 2.dp, bottom = 4.dp)
-                        )
-
-                        // Styling additions mapped cleanly inside ABA 2 for added values
-                        Divider(color = Color.Gray.copy(alpha = 0.15f), thickness = 1.dp)
-                        
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                        item {
                             Text(
-                                text = "CALIBRATION OVERLAYS",
-                                color = Color.White,
-                                fontSize = 11.sp
+                                text = "OPÇÕES DE CONTROLE DO MOTOR FÍSICO",
+                                color = Color.Gray,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.5.sp
                             )
-                            Button(
-                                onClick = { 
-                                    isInteractiveMode.value = !isInteractiveMode.value
-                                    onInteractiveModeChanged(isInteractiveMode.value)
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = if (isInteractiveMode.value) Color(0xFF5C1212) else Color(0xFF1E1E2C)),
-                                modifier = Modifier.height(26.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        }
+
+                        item {
+                            EngineToggleRow(
+                                label = "Modo Treino (Simulador)",
+                                checked = isSimulationMode.value,
+                                onCheckedChange = { isSimulationMode.value = it }
+                            )
+                            Text(
+                                text = "Se ATIVADO, roda uma simulação com bolas flutuando (perfeito para demonstrações). Se DESATIVADO, fica 100% limpo para suas partidas reais de 8 Ball.",
+                                color = Color.Gray,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(start = 2.dp)
+                            )
+                        }
+
+                        item {
+                            EngineToggleRow(
+                                label = "Ativar OpenCV",
+                                checked = isOpenCv.value,
+                                onCheckedChange = { isOpenCv.value = it }
+                            )
+                            Text(
+                                text = "Faz varredura e detecta a linha branca do taco do 8-Ball automaticamente por brilho.",
+                                color = Color.Gray,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(start = 2.dp)
+                            )
+                        }
+
+                        item {
+                            EngineToggleRow(
+                                label = "Ativar Guias (Line)",
+                                checked = isLine.value,
+                                onCheckedChange = { isLine.value = it }
+                            )
+                            Text(
+                                text = "Desenha as linhas de trajetórias físicas prevendo ricochetes.",
+                                color = Color.Gray,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(start = 2.dp)
+                            )
+                        }
+                    } else {
+                        // ABA 2 Calibration Options
+                        item {
+                            Text(
+                                text = "CALIBRAÇÃO E AJUSTE DA TABELA",
+                                color = Color.Gray,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.5.sp
+                            )
+                        }
+
+                        item {
+                            EngineToggleRow(
+                                label = "Mira Automática IA",
+                                checked = isAiLine.value,
+                                onCheckedChange = { isAiLine.value = it }
+                            )
+                            Text(
+                                text = "Cálculo autônomo da bola mais favorável com trava de mira imediata.",
+                                color = Color.Gray,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(start = 2.dp)
+                            )
+                        }
+
+                        item {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = if (isInteractiveMode.value) "Lock Table" else "Align Table",
-                                    fontSize = 10.sp,
-                                    color = Color.White
+                                    text = "MODO ALINHAMENTO",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
+                                Button(
+                                    onClick = { 
+                                        isInteractiveMode.value = !isInteractiveMode.value
+                                        onInteractiveModeChanged(isInteractiveMode.value)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = if (isInteractiveMode.value) Color(0xFF5C1212) else Color(0xFF1E1E2C)),
+                                    modifier = Modifier.height(28.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = if (isInteractiveMode.value) "Bloquear Guia" else "Ajustar Guia",
+                                        fontSize = 10.sp,
+                                        color = Color.White
+                                    )
+                                }
                             }
+                            Text(
+                                text = "Mova livremente as bolas de calibração branca e alvo em sua tela para sobrepor seu jogo real.",
+                                color = Color.Gray,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(start = 2.dp)
+                            )
+                        }
+
+                        item {
+                            Divider(color = Color.Gray.copy(alpha = 0.15f), thickness = 1.dp)
+                            Text(
+                                text = "CALIBRAÇÃO DE BORDAS INTERNAS (CUSHIONS)",
+                                color = Color(0xFFD4AF37),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(top = 8.dp)
+                            )
+                        }
+
+                        // Sliders to adjust margins
+                        item {
+                            Text(
+                                text = "Ajuste Cushion Esquerda: ${tableLeftOffset.value.toInt()}px",
+                                color = Color.White,
+                                fontSize = 10.sp
+                            )
+                            Slider(
+                                value = tableLeftOffset.value,
+                                onValueChange = { tableLeftOffset.value = it },
+                                valueRange = -300f..300f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color(0xFFD4AF37),
+                                    activeTrackColor = Color(0xFF8B1010)
+                                )
+                            )
+                        }
+
+                        item {
+                            Text(
+                                text = "Ajuste Cushion Direita: ${tableRightOffset.value.toInt()}px",
+                                color = Color.White,
+                                fontSize = 10.sp
+                            )
+                            Slider(
+                                value = tableRightOffset.value,
+                                onValueChange = { tableRightOffset.value = it },
+                                valueRange = -300f..300f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color(0xFFD4AF37),
+                                    activeTrackColor = Color(0xFF8B1010)
+                                )
+                            )
+                        }
+
+                        item {
+                            Text(
+                                text = "Ajuste Cushion Superior: ${tableTopOffset.value.toInt()}px",
+                                color = Color.White,
+                                fontSize = 10.sp
+                            )
+                            Slider(
+                                value = tableTopOffset.value,
+                                onValueChange = { tableTopOffset.value = it },
+                                valueRange = -300f..300f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color(0xFFD4AF37),
+                                    activeTrackColor = Color(0xFF8B1010)
+                                )
+                            )
+                        }
+
+                        item {
+                            Text(
+                                text = "Ajuste Cushion Inferior: ${tableBottomOffset.value.toInt()}px",
+                                color = Color.White,
+                                fontSize = 10.sp
+                            )
+                            Slider(
+                                value = tableBottomOffset.value,
+                                onValueChange = { tableBottomOffset.value = it },
+                                valueRange = -300f..300f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color(0xFFD4AF37),
+                                    activeTrackColor = Color(0xFF8B1010)
+                                )
+                            )
                         }
                     }
                 }
@@ -693,9 +818,9 @@ fun FloatingDashboard(
             // Bottom credits / info bar
             Column {
                 Divider(color = Color.Gray.copy(alpha = 0.2f), thickness = 1.dp)
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "ITS ENGINE V1 © 2026 NATIVE PHYSICS AR HUD",
+                    text = "ITS ENGINE V2 © 2026 CLIENT INTEGRATION HARDWARE",
                     color = Color.Gray,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,

@@ -15,8 +15,8 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
 
     fun setDetectedCuePosition(x: Float, y: Float) {
         if (service.isOpenCvEnabled.value) {
-            val clampedX = x.coerceIn(tableLeft, tableRight)
-            val clampedY = y.coerceIn(tableTop, tableBottom)
+            val clampedX = x.coerceIn(adjLeft, adjRight)
+            val clampedY = y.coerceIn(adjTop, adjBottom)
             // Smoothly interpolate to filter jitter or noise
             balls[0].pos.x = balls[0].pos.x * 0.7f + clampedX * 0.3f
             balls[0].pos.y = balls[0].pos.y * 0.7f + clampedY * 0.3f
@@ -75,11 +75,27 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
     private var tableTop = 200f
     private var tableBottom = 1400f
 
+    val adjLeft: Float get() = tableLeft + service.tableLeftOffset.value
+    val adjRight: Float get() = tableRight + service.tableRightOffset.value
+    val adjTop: Float get() = tableTop + service.tableTopOffset.value
+    val adjBottom: Float get() = tableBottom + service.tableBottomOffset.value
+
+    // Dynamic pocket positions based on calibrated offsets
+    val pockets: List<PointF>
+        get() = listOf(
+            PointF(adjLeft + 15f, adjTop + 15f),
+            PointF((adjLeft + adjRight) / 2f, adjTop),
+            PointF(adjRight - 15f, adjTop + 15f),
+            PointF(adjLeft + 15f, adjBottom - 15f),
+            PointF((adjLeft + adjRight) / 2f, adjBottom),
+            PointF(adjRight - 15f, adjBottom - 15f)
+        )
+
     // 16 Standard Balls (0 is white Cue ball, 1-15 are object balls)
     private val balls = mutableListOf<BallInfo>().apply {
         // Cue ball (White)
         add(BallInfo(0, PointF(300f, 950f), Color.WHITE, false, Color.BLACK))
-        // Solid balls
+        // Solid/Striped balls
         add(BallInfo(1, PointF(540f, 500f), Color.parseColor("#FFD700"), false)) // Gold/Yellow
         add(BallInfo(2, PointF(600f, 550f), Color.parseColor("#1E90FF"), false)) // Blue
         add(BallInfo(3, PointF(480f, 550f), Color.parseColor("#FF3333"), false)) // Red
@@ -88,7 +104,6 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
         add(BallInfo(6, PointF(420f, 600f), Color.parseColor("#228B22"), false)) // Green
         add(BallInfo(7, PointF(540f, 400f), Color.parseColor("#8B4513"), false)) // Maroon/Brown
         add(BallInfo(8, PointF(540f, 550f), Color.BLACK, false, Color.WHITE))     // Black
-        // Stripe balls
         add(BallInfo(9, PointF(600f, 450f), Color.parseColor("#FFD700"), true)) // Yellow Stripe
         add(BallInfo(10, PointF(300f, 450f), Color.parseColor("#1E90FF"), true)) // Blue Stripe
         add(BallInfo(11, PointF(220f, 670f), Color.parseColor("#FF3333"), true)) // Red Stripe
@@ -97,12 +112,6 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
         add(BallInfo(14, PointF(280f, 1250f), Color.parseColor("#228B22"), true)) // Green Stripe
         add(BallInfo(15, PointF(440f, 750f), Color.parseColor("#8B4513"), true)) // Maroon Stripe
     }
-
-    // Pockets
-    private val pockets = listOf(
-        PointF(100f, 200f), PointF(540f, 190f), PointF(980f, 200f),
-        PointF(100f, 1400f), PointF(540f, 1410f), PointF(980f, 1400f)
-    )
 
     private var animationTick = 0f
     private var selectedBall: BallInfo? = null
@@ -114,7 +123,7 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
     }
 
     fun updatePhysicsTick() {
-        if (!service.isInteractiveMode.value && service.isAnalyzing.value) {
+        if (service.isSimulationMode.value && !service.isInteractiveMode.value && service.isAnalyzing.value) {
             // Simulated game physics movement loop for premium rendering preview
             animationTick += 0.02f
             if (animationTick > 2f * Math.PI) {
@@ -190,6 +199,10 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
                 var closestBall: BallInfo? = null
                 var minDist = touchProgressRadius
                 balls.forEach { ball ->
+                    // If not in simulation mode, ignore touch processing on fake decoration balls 2-15
+                    if (!service.isSimulationMode.value && ball.id != 0 && ball.id != 1) {
+                        return@forEach
+                    }
                     val distCurrent = distance(x, y, ball.pos.x, ball.pos.y)
                     if (distCurrent < minDist) {
                         minDist = distCurrent
@@ -209,9 +222,9 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
             }
             MotionEvent.ACTION_MOVE -> {
                 selectedBall?.let { ball ->
-                    // Constrain ball movement inside table cushions
-                    ball.pos.x = x.coerceIn(tableLeft, tableRight)
-                    ball.pos.y = y.coerceIn(tableTop, tableBottom)
+                    // Constrain ball movement inside table cushions using calibrated adj parameters
+                    ball.pos.x = x.coerceIn(adjLeft, adjRight)
+                    ball.pos.y = y.coerceIn(adjTop, adjBottom)
                     invalidate()
                     return true
                 }
@@ -301,7 +314,7 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
 
             // Right border collision test
             if (dx > 0) {
-                val t = (tableRight - curX) / dx
+                val t = (adjRight - curX) / dx
                 if (t > 0 && t < tBorder) {
                     tBorder = t
                     hitXBorder = true
@@ -309,7 +322,7 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
             }
             // Left border collision test
             else if (dx < 0) {
-                val t = (tableLeft - curX) / dx
+                val t = (adjLeft - curX) / dx
                 if (t > 0 && t < tBorder) {
                     tBorder = t
                     hitXBorder = true
@@ -318,7 +331,7 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
 
             // Bottom border collision test
             if (dy > 0) {
-                val t = (tableBottom - curY) / dy
+                val t = (adjBottom - curY) / dy
                 if (t > 0 && t < tBorder) {
                     tBorder = t
                     hitXBorder = false
@@ -326,7 +339,7 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
             }
             // Top border collision test
             else if (dy < 0) {
-                val t = (tableTop - curY) / dy
+                val t = (adjTop - curY) / dy
                 if (t > 0 && t < tBorder) {
                     tBorder = t
                     hitXBorder = false
@@ -373,12 +386,29 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
         val cueBall = balls[0]
         val ballRadius = 24f
 
+        // 0. Dynamic cushion border boundaries guide for real-world calibration
+        if (service.isInteractiveMode.value || !service.isSimulationMode.value) {
+            val cushionBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#90FFD700") // Translucent Gold
+                style = Paint.Style.STROKE
+                strokeWidth = 3f
+                pathEffect = DashPathEffect(floatArrayOf(16f, 16f), 0f)
+            }
+            canvas.drawRect(adjLeft, adjTop, adjRight, adjBottom, cushionBorderPaint)
+        }
+
+        // Force target ball to 1 in real match play mode
+        if (!service.isSimulationMode.value) {
+            activeTargetBallId = 1
+        }
+
         // 1. AI Automatic Target/Lock Mode (Aí Line Automatica)
         if (service.isAiLineEnabled.value) {
             var bestBallId = activeTargetBallId
             var maxPocketableScore = -1f
             
             balls.forEach { ball ->
+                if (!service.isSimulationMode.value && ball.id != 1) return@forEach
                 if (ball.id == 0) return@forEach // skip cue ball
                 pockets.forEach { pocket ->
                     val distToPocket = distance(ball.pos.x, ball.pos.y, pocket.x, pocket.y)
@@ -396,7 +426,7 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
             // Draw AI lock tagline
             textPaint.color = Color.parseColor("#FFD700")
             textPaint.textSize = 24f
-            canvas.drawText("AI AUTO-LOCK: TARGETED BALL #${bestBallId}", width / 2f, tableTop - 70f, textPaint)
+            canvas.drawText("AI AUTO-LOCK: TARGETED BALL #${bestBallId}", width / 2f, adjTop - 70f, textPaint)
         }
 
         val activeTargetBall = balls.firstOrNull { it.id == activeTargetBallId } ?: balls[1]
@@ -430,7 +460,7 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
         }
 
         // Draw targeted/assistance guides (if active)
-        if (service.isLineEnabled.value && service.onlyTargetedBalls.value) {
+        if (service.isLineEnabled.value && (service.onlyTargetedBalls.value || !service.isSimulationMode.value)) {
             // Find closest pocket to target ball
             var targetPocket = pockets[1]
             var minDist = Float.MAX_VALUE
@@ -534,11 +564,11 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
                     textPaint.textSize = 22f
                     val angleOffset = Math.abs(Math.atan2(dyObj.toDouble(), dxObj.toDouble()))
                     val pct = (100 - (angleOffset % 0.2f) * 100).toInt().coerceIn(75, 100)
-                    canvas.drawText("SHOT STATE: $pct% POCKETABLE (DIRECT PATH CLEAR)", width / 2f, tableTop - 35f, textPaint)
+                    canvas.drawText("SHOT STATE: $pct% POCKETABLE (DIRECT PATH CLEAR)", width / 2f, adjTop - 35f, textPaint)
                 }
             }
 
-        } else {
+        } else if (service.isSimulationMode.value) {
             if (service.isLineEnabled.value) {
                 // Draw predictive guides for ALL active object balls (vibrant multi-guide grid mode!)
                 balls.forEach { ball ->
@@ -613,6 +643,11 @@ class OverlayCanvasView(context: Context, private val service: OverlayService) :
         // 5. Classic High Contrast M3 styled pool balls
         if (service.colorBalls.value) {
             balls.forEach { ball ->
+                // If not in simulation mode, skip drawing extra balls to leave screen clear and transparent
+                if (!service.isSimulationMode.value && ball.id != 0 && ball.id != 1) {
+                    return@forEach
+                }
+
                 // Shadow backgound glow
                 ballPaint.color = Color.argb(60, 0, 0, 0)
                 canvas.drawCircle(ball.pos.x + 4f, ball.pos.y + 4f, ballRadius, ballPaint)
